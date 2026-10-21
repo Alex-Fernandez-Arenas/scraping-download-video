@@ -1,0 +1,38 @@
+{
+  "name": "scraping-download-video",
+  "version": "2.0.0",
+  "description": "YouTube channel scraper with SQLite storage, a web dashboard, and yt-dlp downloads",
+  "license": "MIT",
+  "author": "Jhon Alex Fernandez Arenas",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alex-Fernandez-Arenas/scraping-download-video.git"
+  },
+  "keywords": [
+    "youtube",
+    "scraper",
+    "playwright",
+    "sqlite",
+    "yt-dlp"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "scrape": "node video_scraper.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "better-sqlite3": "^11.7.0",
+    "bgutils": "^1.0.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "playwright": "^1.50.1"
+  }
+}

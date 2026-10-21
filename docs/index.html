@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestor de Descargas YouTube</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .video-card { transition: all 0.2s; }
+        .video-card:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        .animate-fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .progress-bar-striped { background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent); background-size: 1rem 1rem; }
+        .animate-pulse-fast { animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .progress-container { transition: opacity 0.2s ease-in-out; }
+        .progress-fill { transition: width 0.3s ease-out; }
+        .download-btn { transition: all 0.15s ease-in-out; }
+        .download-btn:disabled { opacity: 0.7; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-800">📺 Gestor de Descargas</h1>
+                <p class="text-gray-600">Sistema de automatización de clips</p>
+            </div>
+            <div class="flex flex-wrap gap-4 items-center">
+                <button onclick="syncFiles()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 shadow-sm transition-colors flex items-center">
+                    <i class="fas fa-folder-open mr-2"></i>Sincronizar
+                </button>
+                <button onclick="loadVideos()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 shadow-sm transition-colors flex items-center">
+                    <i class="fas fa-sync-alt mr-2"></i>Recargar
+                </button>
+            </div>
+        </header>
+
+        <!-- Tabs Navigation -->
+        <div id="tabsContainer" class="flex border-b mb-6 overflow-x-auto scrollbar-hide">
+            <!-- Tabs injected via JS -->
+        </div>
+
+        <div id="channelsContainer" class="min-h-[50vh]">
+            <div class="text-center py-12">
+                <i class="fas fa-circle-notch fa-spin text-4xl text-gray-400"></i>
+                <p class="mt-4 text-gray-500">Cargando videos...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded shadow-lg transform translate-y-20 transition-transform duration-300 z-50">
+        <span id="toastMsg">Mensaje</span>
+    </div>
+
+    <script>
+        // Estado global de descargas (persiste entre cambios de pestaña)
+        const downloadsState = new Map(); // videoId -> { channel, percent, speed, total, status }
+        let currentDb = {};
+        let activeTab = null;
+
+        // SSE Connection
+        const evtSource = new EventSource('/events');
+        
+        evtSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                handleServerEvent(data);
+            } catch (e) {
+                console.error('Error parsing SSE event', e);
+            }
+        };
+
+        evtSource.onerror = (err) => {
+            console.error('SSE connection error', err);
+            setTimeout(() => location.reload(), 5000);
+        };
+
+        // Cargar descargas activas al inicio
+        async function loadActiveDownloads() {
+            try {
+                const res = await fetch('/downloads/active');
+                const data = await res.json();
+                if (data.downloads && data.downloads.length > 0) {
+                    data.downloads.forEach(d => {
+                        downloadsState.set(d.videoId, {
+                            channel: d.channel,
+                            percent: d.percent || 0,
+                            speed: d.speed,
+                            total: d.total,
+                            status: d.status
+                        });
+                    });
+                    console.log('Descargas activas restauradas:', data.downloads.length);
+                }
+            } catch (e) {
+                console.error('Error loading active downloads', e);
+            }
+        }
+
+        function handleServerEvent(data) {
+            const { type, videoId, channel, percent, speed, total, message } = data;
+            
+            // Actualizar estado SIEMPRE (sin importar la pestaña activa)
+            if (type === 'progress') {
+                downloadsState.set(videoId, { channel, percent, speed, total, status: 'downloading' });
+            } else if (type === 'completed') {
+                downloadsState.delete(videoId);
+                showToast(`✅ Descarga completada: ${videoId}`, 'success');
+                
+                // Actualizar estado local de la BD
+                if (currentDb[channel] && currentDb[channel][videoId]) {
+                    currentDb[channel][videoId].isDownload = true;
+                }
+            } else if (type === 'error') {
+                downloadsState.delete(videoId);
+                showToast(`❌ Error: ${message || 'Fallo en descarga'}`, 'error');
+            }
+
+            // Solo actualizar DOM si la pestaña está activa
+            if (activeTab === channel) {
+                updateVideoCard(videoId, type, data);
+            }
+        }
+
+        function updateVideoCard(videoId, eventType, data) {
+            const { percent, speed, total } = data;
+            
+            const progressBar = document.getElementById(`progress-${videoId}`);
+            const progressFill = document.getElementById(`fill-${videoId}`);
+            const progressText = document.getElementById(`text-${videoId}`);
+            const btn = document.getElementById(`btn-${videoId}`);
+            const badge = document.getElementById(`badge-${videoId}`);
+            const card = document.getElementById(`card-${videoId}`);
+
+            if (eventType === 'progress') {
+                // Mostrar barra de progreso
+                if (progressBar) {
+                    progressBar.classList.remove('hidden');
+                    progressBar.style.opacity = '1';
+                }
+                if (progressFill) {
+                    progressFill.style.width = `${percent}%`;
+                }
+                if (progressText) {
+                    const speedStr = speed && speed !== '?' ? ` - ${speed}` : '';
+                    const totalStr = total && total !== '?' ? ` (${total})` : '';
+                    progressText.textContent = `${percent}%${speedStr}${totalStr}`;
+                }
+                
+                // Actualizar botón
+                if (btn) {
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Descargando...';
+                    btn.disabled = true;
+                    btn.className = 'download-btn text-sm px-4 py-1.5 rounded-lg font-medium bg-blue-100 text-blue-700 flex items-center w-full justify-center';
+                }
+                
+                // Ocultar badge
+                if (badge) badge.classList.add('hidden');
+                
+                // Actualizar estilo de tarjeta
+                if (card) {
+                    card.classList.remove('border-green-200', 'bg-green-50/30');
+                    card.classList.add('border-blue-200');
+                }
+            } else if (eventType === 'completed') {
+                // Ocultar barra de progreso con fade
+                if (progressBar) {
+                    progressBar.style.opacity = '0';
+                    setTimeout(() => progressBar.classList.add('hidden'), 200);
+                }
+                
+                // Mostrar badge
+                if (badge) badge.classList.remove('hidden');
+                
+                // Actualizar estilo de tarjeta
+                if (card) {
+                    card.classList.remove('border-blue-200');
+                    card.classList.add('border-green-200', 'bg-green-50/30');
+                }
+                
+                // Resetear botón
+                if (btn) {
+                    btn.innerHTML = '<i class="fas fa-check mr-1"></i>Redescargar';
+                    btn.disabled = false;
+                    btn.className = 'download-btn text-sm px-4 py-1.5 rounded-lg font-medium bg-green-100 text-green-700 hover:bg-green-200 flex items-center w-full justify-center transition-colors';
+                }
+            } else if (eventType === 'error') {
+                // Ocultar barra de progreso
+                if (progressBar) progressBar.classList.add('hidden');
+                
+                // Quitar estilo de descarga
+                if (card) {
+                    card.classList.remove('border-blue-200');
+                    card.classList.add('border-gray-200');
+                }
+                
+                // Resetear botón
+                if (btn) {
+                    btn.innerHTML = '<i class="fas fa-redo mr-1"></i>Reintentar';
+                    btn.disabled = false;
+                    btn.className = 'download-btn text-sm px-4 py-1.5 rounded-lg font-medium bg-red-100 text-red-700 hover:bg-red-200 flex items-center w-full justify-center transition-colors';
+                }
+            }
+        }
+
+        async function loadVideos() {
+            try {
+                const res = await fetch('/videos');
+                if (!res.ok) throw new Error('Error en la respuesta del servidor');
+                currentDb = await res.json();
+                renderTabs();
+            } catch (e) {
+                console.error(e);
+                showToast('Error cargando videos: ' + e.message, 'error');
+                document.getElementById('channelsContainer').innerHTML = `
+                    <div class="text-center py-12 text-red-500">
+                        <i class="fas fa-exclamation-triangle text-4xl mb-4"></i>
+                        <p>Error al cargar los videos.</p>
+                        <button onclick="loadVideos()" class="mt-4 text-blue-600 underline">Reintentar</button>
+                    </div>`;
+            }
+        }
+
+        async function syncFiles() {
+            showToast('Sincronizando archivos...', 'info');
+            try {
+                const res = await fetch('/sync', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message, 'success');
+                loadVideos(); // Reload to show changes
+            } catch (e) {
+                console.error(e);
+                showToast('Error en sincronización', 'error');
+            }
+        }
+
+        function renderTabs() {
+            const tabsContainer = document.getElementById('tabsContainer');
+            const channels = Object.keys(currentDb);
+            
+            if (channels.length === 0) {
+                tabsContainer.innerHTML = '';
+                document.getElementById('channelsContainer').innerHTML = '<div class="text-center text-gray-500 py-10">No hay canales en la base de datos. Ejecuta el scraper primero.</div>';
+                return;
+            }
+
+            if (!activeTab || !channels.includes(activeTab)) {
+                activeTab = channels[0];
+            }
+
+            tabsContainer.innerHTML = channels.map(channel => `
+                <button 
+                    onclick="switchTab('${channel}')"
+                    class="px-6 py-3 font-medium text-sm transition-colors border-b-2 whitespace-nowrap flex items-center ${
+                        activeTab === channel 
+                        ? 'border-blue-600 text-blue-600 bg-blue-50' 
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                    }"
+                >
+                    <i class="fab fa-youtube mr-2 ${activeTab === channel ? 'text-red-600' : 'text-gray-400'}"></i>
+                    ${channel}
+                    <span class="ml-2 text-xs bg-gray-200 px-2 py-0.5 rounded-full text-gray-600">
+                        ${Object.keys(currentDb[channel]).length}
+                    </span>
+                </button>
+            `).join('');
+
+            renderContent();
+        }
+
+        function switchTab(channel) {
+            activeTab = channel;
+            renderTabs(); 
+        }
+
+        function renderContent() {
+            const container = document.getElementById('channelsContainer');
+            container.innerHTML = '';
+
+            const videos = currentDb[activeTab];
+            if (!videos) return;
+
+            const section = document.createElement('div');
+            section.className = 'animate-fade-in';
+            
+            const grid = document.createElement('div');
+            grid.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6';
+
+            // Sort videos: strictly by orderIndex (scrape order)
+            const sortedVideos = Object.values(videos).sort((a, b) => {
+                return (a.orderIndex || 0) - (b.orderIndex || 0);
+            });
+
+            sortedVideos.forEach(video => {
+                const card = document.createElement('div');
+                const isDownloaded = video.isDownload;
+                const downloadingState = downloadsState.get(video.id);
+
+                card.id = `card-${video.id}`;
+                card.className = `video-card border rounded-xl overflow-hidden bg-white shadow-sm hover:shadow-md transition-all ${
+                    isDownloaded ? 'border-green-200 bg-green-50/30' : 'border-gray-200'
+                }`;
+                
+                card.innerHTML = `
+                    <div class="relative aspect-video bg-gray-200 group">
+                        <img src="${video.thumbnailUrl}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" loading="lazy" alt="${video.title}">
+                        <div class="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-2 py-1 rounded font-mono">
+                            ${video.duration || '??:??'}
+                        </div>
+                        <div id="badge-${video.id}" class="absolute top-2 right-2 bg-green-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow-sm flex items-center ${isDownloaded && !downloadingState ? '' : 'hidden'}">
+                            <i class="fas fa-check mr-1"></i>DESCARGADO
+                        </div>
+                    </div>
+                    <div class="p-4">
+                        <h3 class="font-bold text-gray-800 text-sm line-clamp-2 h-10 mb-3 leading-snug" title="${video.title}">${video.title}</h3>
+                        
+                        <!-- Progress Bar Container -->
+                        <div id="progress-${video.id}" class="mb-3 progress-container ${downloadingState ? '' : 'hidden'}">
+                            <div class="flex justify-between text-xs text-gray-600 mb-1">
+                                <span>Descargando...</span>
+                                <span id="text-${video.id}">${downloadingState ? downloadingState.percent + '%' : '0%'}</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                                <div id="fill-${video.id}" class="bg-blue-600 h-2.5 rounded-full progress-bar-striped progress-fill animate-pulse-fast" style="width: ${downloadingState ? downloadingState.percent : 0}%"></div>
+                            </div>
+                            ${downloadingState && downloadingState.speed ? `<div class="text-xs text-gray-500 mt-1">${downloadingState.speed} - ${downloadingState.total || '?'}</div>` : ''}
+                        </div>
+
+                        <div class="flex justify-between items-center pt-2 border-t border-gray-100">
+                            <span class="text-xs text-gray-500 font-medium"><i class="far fa-calendar-alt mr-1"></i>${video.uploadDate || 'N/A'}</span>
+                            <button 
+                                id="btn-${video.id}"
+                                onclick="downloadVideo('${activeTab}', '${video.id}', this)"
+                                class="download-btn text-sm px-4 py-1.5 rounded-lg font-medium transition-all transform active:scale-95 flex items-center w-full justify-center ml-4 ${
+                                    downloadingState ? 'bg-blue-100 text-blue-700 cursor-wait' :
+                                    isDownloaded ? 'bg-green-100 text-green-700 hover:bg-green-200' : 
+                                    'bg-blue-600 text-white hover:bg-blue-700 shadow-sm hover:shadow'
+                                }"
+                                ${downloadingState ? 'disabled' : ''}
+                            >
+                                ${downloadingState ? '<i class="fas fa-spinner fa-spin mr-2"></i>Descargando...' :
+                                  isDownloaded ? '<i class="fas fa-check mr-1"></i>Redescargar' : 
+                                  '<i class="fas fa-download mr-1"></i>Descargar'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+
+            section.appendChild(grid);
+            container.appendChild(section);
+        }
+
+        async function downloadVideo(channel, videoId, btn) {
+            if (downloadsState.has(videoId)) {
+                showToast('Este video ya se está descargando', 'warning');
+                return;
+            }
+            
+            // Agregar al estado de descargas inmediatamente
+            downloadsState.set(videoId, { 
+                channel, 
+                percent: 0, 
+                speed: null, 
+                total: null, 
+                status: 'starting' 
+            });
+            
+            // Actualizar SOLO la tarjeta afectada (sin re-renderizar todo)
+            const progressBar = document.getElementById(`progress-${videoId}`);
+            const progressFill = document.getElementById(`fill-${videoId}`);
+            const progressText = document.getElementById(`text-${videoId}`);
+            const badge = document.getElementById(`badge-${videoId}`);
+            const card = document.getElementById(`card-${videoId}`);
+            
+            // Mostrar barra de progreso
+            if (progressBar) progressBar.classList.remove('hidden');
+            if (progressFill) progressFill.style.width = '0%';
+            if (progressText) progressText.textContent = 'Iniciando...';
+            if (badge) badge.classList.add('hidden');
+            
+            // Actualizar botón
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Iniciando...';
+            btn.disabled = true;
+            btn.className = 'download-btn text-sm px-4 py-1.5 rounded-lg font-medium bg-blue-100 text-blue-700 cursor-wait flex items-center w-full justify-center';
+            
+            // Actualizar estilo de tarjeta
+            if (card) {
+                card.classList.remove('border-green-200', 'bg-green-50/30');
+                card.classList.add('border-blue-200');
+            }
+
+            showToast(`Iniciando descarga: ${videoId}...`);
+
+            try {
+                const res = await fetch(`/download?channel=${encodeURIComponent(channel)}&video=${encodeURIComponent(videoId)}`);
+                const data = await res.json();
+                
+                if (data.status === 'busy') {
+                    showToast('Ya hay una descarga en curso para este video', 'warning');
+                    downloadsState.delete(videoId);
+                    if (progressBar) progressBar.classList.add('hidden');
+                    if (card) {
+                        card.classList.remove('border-blue-200');
+                        card.classList.add('border-gray-200');
+                    }
+                    renderContent();
+                } else if (data.status === 'error') {
+                    showToast('Error al iniciar descarga: ' + (data.message || 'Error desconocido'), 'error');
+                    downloadsState.delete(videoId);
+                    if (progressBar) progressBar.classList.add('hidden');
+                    renderContent();
+                }
+                // Si status === 'downloading', el SSE se encargará de actualizar el progreso
+            } catch (e) {
+                console.error(e);
+                showToast('Error de conexión', 'error');
+                downloadsState.delete(videoId);
+                if (progressBar) progressBar.classList.add('hidden');
+                renderContent();
+            }
+        }
+
+        function showToast(msg, type = 'info') {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toastMsg');
+            toastMsg.textContent = msg;
+            
+            const colors = {
+                info: 'bg-gray-800',
+                error: 'bg-red-600',
+                success: 'bg-green-600',
+                warning: 'bg-yellow-600'
+            };
+            
+            toast.className = `fixed bottom-4 right-4 text-white px-6 py-3 rounded shadow-lg transform transition-transform duration-300 z-50 ${colors[type] || colors.info}`;
+            
+            requestAnimationFrame(() => {
+                toast.style.transform = 'translateY(0)';
+            });
+            
+            setTimeout(() => {
+                toast.style.transform = 'translateY(150%)';
+            }, 3000);
+        }
+
+        // Initial load
+        loadActiveDownloads();
+        loadVideos();
+    </script>
+</body>
+</html>

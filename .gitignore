@@ -1,0 +1,56 @@
+# ===========================================
+# Archivos ignorados por Git
+# ===========================================
+
+# Dependencias
+node_modules/
+
+# Variables de entorno (pueden contener credenciales)
+.env
+.env.local
+.env.*.local
+
+# Archivos de autenticación y credenciales
+auth.json
+*-auth.json
+cookies.txt
+*.cookies
+
+# Bases de datos generadas en tiempo de ejecución
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+db/video_database.json
+
+# Videos descargados
+VIDEOS/
+downloads/
+media/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+server.log
+
+# Archivos temporales
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
